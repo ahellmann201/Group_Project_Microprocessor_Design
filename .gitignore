@@ -1,0 +1,13 @@
+# CCS generated build output and editor caches
+/Debug/
+/Release/
+/.clangd
+/.cache/
+/.metadata/
+/.theia/
+
+# Local backups and OS files
+*.bak
+.DS_Store
+Thumbs.db
+Desktop.ini
