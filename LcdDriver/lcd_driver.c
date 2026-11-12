@@ -27,12 +27,12 @@ void Crystalfontz128x128_Init(void)
     HAL_LCD_SpiInit();
 
     P9OUT &= ~BIT4;             // Reset pin low
-    __delay_cycles(50);
+    __delay_cycles(80000);  // 10 ms at 8 MHz MCLK
     P9OUT |= BIT4;              // Reset pin high
-    __delay_cycles(120);
+    __delay_cycles(960000); // 120 ms at 8 MHz MCLK
 
     HAL_LCD_writeCommand(CM_SLPOUT);
-    __delay_cycles(200);
+    __delay_cycles(960000); // 120 ms sleep-out at 8 MHz MCLK
 
     HAL_LCD_writeCommand(CM_GAMSET);
     HAL_LCD_writeData(0x04);

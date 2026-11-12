@@ -18,8 +18,10 @@ BoosterPack Mark II, developed in Code Composer Studio.
 
 Import this folder as an existing CCS project, select the MSP430FR6989 target,
 and build. The source includes the required Lab 9 graphics and LCD library.
-The four low-level LCD interface functions are supplied by `main.c`; do not add
-the original `middle_driver.c` or `lab9.c` alongside it.
+The LCD code follows Lab 9, with two SPI completion waits in
+`LcdDriver/middle_driver.c` and three startup-delay changes in
+`LcdDriver/lcd_driver.c`. Build that file alongside `main.c` and
+`LcdDriver/lcd_driver.c`; do not add `lab9.c` or a second copy of the LCD HAL.
 
 Use TI MSP430 compiler 21.6.3.LTS or a compatible version. The project settings
 reserve 256 bytes for the stack. Build outputs and local backups are ignored.
@@ -40,9 +42,9 @@ revision compiled and linked; physical validation of that addition is pending.
 
 ## Contents
 
-- `main.c`: application and corrected low-level LCD interface.
+- `main.c`: smart lighting application.
 - `GrLib/`: TI graphics library and fonts.
-- `LcdDriver/`: LCD controller driver and interface headers.
+- `LcdDriver/`: Lab 9 controller driver, corrected interface and headers.
 - `.ccsproject`, `.cproject`, `.project`, `.settings/`, `targetConfigs/`:
   CCS project and device settings.
 - `lnk_msp430fr6989.cmd`: device linker command file.

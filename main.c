@@ -45,71 +45,14 @@ static void clock_init(void)
     CSCTL0_H = 0;
 }
 
-/* Corrected implementations of the Lab 9 HAL; exclude middle_driver.c. */
-void HAL_LCD_PortInit(void)
-{
-    P1SEL0 |= BIT4 | BIT6;
-    P1SEL1 &= ~(BIT4 | BIT6);
-    P9SEL0 &= ~BIT4; P9SEL1 &= ~BIT4;
-    P9OUT |= BIT4; P9DIR |= BIT4;
-    P2SEL0 &= ~(BIT3 | BIT5 | BIT6);
-    P2SEL1 &= ~(BIT3 | BIT5 | BIT6);
-    P2OUT = (P2OUT & ~(BIT3 | BIT5)) | BIT6;
-    P2DIR |= BIT3 | BIT5 | BIT6;
-}
-
-void HAL_LCD_SpiInit(void)
-{
-    UCB0CTLW0 = UCSWRST | UCCKPH | UCMSB | UCMST | UCSYNC | UCSSEL__SMCLK;
-    UCB0BRW = 1;
-    UCB0CTLW0 &= ~UCSWRST;
-}
-
-void HAL_LCD_writeCommand(uint8_t command)
-{
-    while (UCB0STATW & UCBUSY) { }
-    P2OUT &= ~BIT3;
-    UCB0TXBUF = command;
-    while (UCB0STATW & UCBUSY) { }
-    P2OUT |= BIT3; /* Only change D/C after the last clock edge. */
-}
-
-void HAL_LCD_writeData(uint8_t data)
-{
-    while (UCB0STATW & UCBUSY) { }
-    P2OUT |= BIT3;
-    UCB0TXBUF = data;
-    while (UCB0STATW & UCBUSY) { }
-}
-
 static void lcd_init(void)
 {
-    /* Use the Lab 9 controller settings with millisecond reset/sleep delays.
-     * Its original Init uses 120/200 CPU cycles, too short for sleep-out.
-     * All startup delays occur before the application timers are started.
-     */
-    HAL_LCD_PortInit();
-    HAL_LCD_SpiInit();
-    P9OUT &= ~BIT4; __delay_cycles(80000);   /* 10 ms at 8 MHz */
-    P9OUT |= BIT4;  __delay_cycles(960000);  /* 120 ms */
-    HAL_LCD_writeCommand(CM_SWRESET); __delay_cycles(1200000); /* 150 ms */
-    HAL_LCD_writeCommand(CM_SLPOUT);  __delay_cycles(960000);  /* 120 ms */
-    HAL_LCD_writeCommand(CM_GAMSET); HAL_LCD_writeData(0x04);
-    HAL_LCD_writeCommand(CM_SETPWCTR);
-    HAL_LCD_writeData(0x0A); HAL_LCD_writeData(0x14);
-    HAL_LCD_writeCommand(CM_SETSTBA);
-    HAL_LCD_writeData(0x0A); HAL_LCD_writeData(0x00);
-    HAL_LCD_writeCommand(CM_COLMOD); HAL_LCD_writeData(0x05);
-    Lcd_ScreenWidth = 128; Lcd_ScreenHeigth = 128;
-    Lcd_PenSolid = 0; Lcd_FontSolid = 1; Lcd_FlagRead = 0;
-    Lcd_TouchTrim = 0;
-    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
-    HAL_LCD_writeCommand(CM_NORON);
-    HAL_LCD_writeCommand(CM_DISPON);
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(0);
     Graphics_initContext(&screen, &g_sCrystalfontz128x128);
-    Graphics_setBackgroundColor(&screen, GRAPHICS_COLOR_BLACK);
-    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_WHITE);
-    Graphics_setFont(&screen, &g_sFontFixed6x8);
+    Graphics_setBackgroundColor(&screen, GRAPHICS_COLOR_NAVY);
+    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_YELLOW);
+    GrContextFontSet(&screen, &g_sFontFixed6x8);
     Graphics_clearDisplay(&screen);
 }
 
@@ -128,9 +71,9 @@ static void line(uint8_t y, const char *text)
     previous[row][sizeof previous[row] - 1] = 0;
     drawn |= mask;
     r.yMin = y; r.yMax = y + 9;
-    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_BLACK);
+    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_NAVY);
     Graphics_fillRectangle(&screen, &r);
-    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_WHITE);
+    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_YELLOW);
     Graphics_drawString(&screen, (int8_t *)text, AUTO_STRING_LENGTH,
                         0, y, OPAQUE_TEXT);
 }
@@ -501,28 +444,3 @@ __interrupt void scheduler_isr(void)
     }
     __bic_SR_register_on_exit(LPM0_bits);
 }
-
-/* LCD HAL pin/configuration code adapted from the user's TI-derived Lab 9.
- * Copyright (c) 2015, Texas Instruments Incorporated. All rights reserved.
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- * 1. Redistributions of source code must retain the above copyright notice,
- *    this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the documentation
- *    and/or other materials provided with the distribution.
- * 3. Neither the name of Texas Instruments Incorporated nor the names of its
- *    contributors may be used to endorse or promote products derived from
- *    this software without specific prior written permission.
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */

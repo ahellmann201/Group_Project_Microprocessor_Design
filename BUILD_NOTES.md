@@ -4,11 +4,13 @@
 
 ## GP project setup
 
-The supplied main.c needs the Lab 9 `GrLib` folder, `LcdDriver/lcd_driver.c`,
-`LcdDriver/lcd_driver.h`, and `LcdDriver/middle_driver.h` in the CCS project.
-Do not compile `lab9.c` or `LcdDriver/middle_driver.c` alongside this file.
-The four corrected LCD HAL functions are already in main.c. In the prepared GP
-copy, the original middle_driver.c is deliberately omitted.
+Build `main.c`, the `GrLib` sources/fonts, `LcdDriver/lcd_driver.c`, and
+`LcdDriver/middle_driver.c` using the supplied headers and CCS settings.
+Do not add `lab9.c` or another copy of the LCD interface functions.
+The LCD code is the original Lab 9 source with only two SPI completion waits
+in middle_driver.c and three reset/sleep delay changes in lcd_driver.c.
+Both driver headers and all graphics library files are unchanged from Lab 9.
+main.c uses the original Crystalfontz128x128_Init and SetOrientation calls.
 
 The original Lab 9 HAL changes D/C immediately after starting a command transfer.
 The replacement waits for the transfer to finish before changing D/C. Startup
@@ -172,3 +174,56 @@ notes describing P2.6 as a permanently-on backlight output.
 
 Reference: TI BOOSTXL-EDUMKII guide, sections 2.1.6 and 2.1.8:
 https://www.ti.com/lit/ug/slau599b/slau599b.pdf
+
+## LCD source organization
+
+The LCD HAL and controller initialization were moved unchanged into
+`LcdDriver/middle_driver.c`, along with their TI copyright/license notice.
+`HAL_LCD_Init()` is declared in middle_driver.h. The application retains only
+the graphics-context setup in its lcd_init wrapper. Historical notes about
+excluding middle_driver.c or providing the HAL in main.c are superseded by
+the GP project setup section above. No lighting or sensor behavior changed.
+
+## Original Lab 9 LCD restored (current implementation)
+
+At the user's request, every file under LcdDriver and GrLib now matches the
+provided Lab 9 project byte-for-byte, including original TI notices. The
+application calls Crystalfontz128x128_Init and SetOrientation(0), uses the
+Lab 9 navy/yellow colors and fixed 6x8 font for text. No custom HAL_LCD_Init
+function or corrected low-level SPI implementation remains.
+
+This supersedes earlier descriptions of corrected command/data timing and
+longer reset/sleep delays: the original Lab 9 behavior is restored as requested.
+Application-specific smart-lighting text and changed-line caching remain; the
+Lab 9 demo shapes and counter are not part of the smart-lighting interface.
+The shared system clock, sensors, timers and dual-red-LED controls retain the
+working project settings. Physical operation after restoring the original LCD
+code requires verification on the board.
+## Current LCD compatibility arrangement
+
+Per the latest clarification, lcd_driver.c and lcd_driver.h are byte-for-byte
+Lab 9 originals; middle_driver.h retains the original interface and notice,
+with only the HAL_LCD_Init prototype added. middle_driver.c contains the
+corrected HAL transfer timing and controller initialization. main.c calls
+HAL_LCD_Init before setting up the graphics context. MCLK is 8 MHz and SMCLK
+is 1 MHz, matching the previously working application timing. The exact-Lab-9
+restoration note above is superseded for middle_driver.c and its new prototype.
+
+## Minimal Lab 9 changes (current implementation)
+
+This supersedes the previous custom-HAL initialization arrangement. All Lab 9
+function names, port setup, SPI setup, controller command sequence, formatting
+and copyright notices are retained. There is no HAL_LCD_Init helper or new
+header declaration. middle_driver.h and lcd_driver.h match Lab 9 exactly.
+
+The only LCD library changes are:
+- middle_driver.c: wait for the previous SPI byte before taking D/C low,
+  and wait for a command to finish before returning D/C high.
+- lcd_driver.c: increase the three reset/sleep startup delays to 10 ms,
+  120 ms and 120 ms at the application's existing 8 MHz MCLK.
+
+All GrLib files remain byte-for-byte originals. main.c calls the original
+Crystalfontz128x128_Init and SetOrientation(0), with the Lab 9 graphics API,
+navy/yellow colors and fixed 6x8 font for lighting information. Sensor, timer,
+button, low-power and dual-red-LED behavior is unchanged. Physical display
+verification is still required after rebuilding and reloading.
