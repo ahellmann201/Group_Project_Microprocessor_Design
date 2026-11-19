@@ -11,4 +11,5 @@
 	<isTargetConfigurationManual value="false"/>
 	<origin value="project-wizard"/>
 	<filesToOpen value="main.c"/>
+	<isTargetManual value="false"/>
 </projectOptions>

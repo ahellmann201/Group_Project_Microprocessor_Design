@@ -1,446 +1,438 @@
-/* ECE370 Smart Lighting System - MSP430FR6989.
- * Build setup and hardware assumptions: see BUILD_NOTES.md.
- */
+
 #include <msp430fr6989.h>
-#include <stdint.h>
-#include <string.h>
-#include "GrLib/grlib/grlib.h"
+#include "Grlib/grlib/grlib.h"
 #include "LcdDriver/lcd_driver.h"
-#include "LcdDriver/middle_driver.h"
+#include <stdio.h>
 
-#define SENSOR_ADDRESS 0x44u
-#define SENSOR_CONFIG  0xC610u /* auto range, 100 ms, continuous, latched */
-#define SECOND_TICKS   100u
-#define I2C_LIMIT      20000UL
-#define RED            BIT0
-#define BOOSTER_RED    BIT6 /* P2.6 / J4.39; J5 must select the RGB red channel. */
-#define GREEN          BIT7
-#define S1             BIT1
-#define S2             BIT2
+#define redLED BIT0
+#define greenLED BIT7
+#define BUT1 BIT1
+#define BUT2 BIT2
+#define SENSOR_ADDR 0x44
 
-static volatile uint16_t ticks;
-static volatile uint8_t button_events;
-static volatile uint8_t pwm_level = 4;
-static Graphics_Context screen;
-static uint8_t auto_mode = 1, manual_on, samples, avg_valid, sensor_error;
-static uint8_t sensor_ready;
-enum {
-    SENSOR_OK, I2C_NO_ACK, I2C_TIMEOUT, I2C_BUS_BUSY, I2C_ARBITRATION,
-    SENSOR_NOT_READY, SENSOR_OVERFLOW, SAMPLE_MISSED, SENSOR_CONFIG_ERROR,
-    SENSOR_ID_ERROR
-};
-static uint8_t bus_error;
-static uint16_t last_sensor_config;
-static uint8_t config_seen;
-static uint16_t manufacturer_id, device_id;
-static uint32_t lux100, sum100, average100;
-static uint16_t next_sample;
+// Function headers
+void Initialize_I2C(void);
+int i2c_write_word(unsigned char i2c_address,
+                   unsigned char i2c_reg, unsigned int data);
+int i2c_read_word(unsigned char i2c_address,
+                  unsigned char i2c_reg);
+void Initialize_Timer(void);
+void Initialize_PWM(void);
+void Initialize_Buttons(void);
+void config_ACLK_to_32KHz_crystal(void);
+void Update_Display(void);
+unsigned char Calculate_Brightness(unsigned long lux);
 
-static void clock_init(void)
+// Graphics context
+Graphics_Context g_sContext;
+
+// Shared variables
+volatile unsigned char timer_flag = 0;
+volatile unsigned char display_flag = 1;
+volatile unsigned char auto_mode = 1;
+volatile unsigned char manual_on = 0;
+volatile unsigned char brightness = 0;
+volatile unsigned char pwm_count = 0;
+
+unsigned char sample_count = 0;
+unsigned long lux_total = 0;
+unsigned long average_lux = 0;
+unsigned long current_lux = 0;
+
+void main(void)
 {
-    CSCTL0_H = CSKEY_H;
-    CSCTL1 = DCOFSEL_6; /* 8 MHz MCLK; DCORSEL=0. */
-    CSCTL2 = SELA__VLOCLK | SELS__DCOCLK | SELM__DCOCLK;
-    CSCTL3 = DIVA__1 | DIVS__8 | DIVM__1; /* Keep SMCLK at 1 MHz. */
+    unsigned int data;
+    unsigned long lux100;
+
+    WDTCTL = WDTPW | WDTHOLD;
+    PM5CTL0 &= ~LOCKLPM5;
+
+    // Configure LEDs
+    P1DIR |= redLED;
+    P1OUT &= ~redLED;
+
+    P9DIR |= greenLED;
+    P9OUT |= greenLED;
+
+    // Configure SMCLK to 8 MHz (Lab 9)
+    CSCTL0 = CSKEY;
+    CSCTL3 &= ~(BIT4 | BIT5 | BIT6);
+    CSCTL0_H = 0;
+
+    config_ACLK_to_32KHz_crystal();
+
+    // Initialize LCD (Lab 9)
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(0);
+
+    Graphics_initContext(&g_sContext,
+                         &g_sCrystalfontz128x128);
+
+    Graphics_setBackgroundColor(&g_sContext,
+                                GRAPHICS_COLOR_DEEP_SKY_BLUE);
+    Graphics_setForegroundColor(&g_sContext,
+                                GRAPHICS_COLOR_DARK_ORANGE);
+
+    Graphics_clearDisplay(&g_sContext);
+    GrContextFontSet(&g_sContext, &g_sFontCm12);
+
+    Initialize_I2C();
+    Initialize_Buttons();
+    Initialize_Timer();
+    Initialize_PWM();
+
+    // Configure OPT3001 (original sensor lab)
+    i2c_write_word(SENSOR_ADDR, 0x01, 0x7604);
+
+    __enable_interrupt();
+
+    Update_Display();
+    display_flag = 0;
+
+    while(1)
+    {
+        if(timer_flag)
+        {
+            __disable_interrupt();
+            timer_flag = 0;
+            __enable_interrupt();
+
+            if(auto_mode)
+            {
+                // Original sensor lab calculation
+                data = i2c_read_word(SENSOR_ADDR, 0x00);
+
+                if(data != 0xFFFF)
+                {
+                    data = data & 0x0FFF;
+                    lux100 = (unsigned long)data * 128;
+
+                    current_lux = lux100 / 100;
+
+                    lux_total += lux100;
+                    sample_count++;
+
+                    if(sample_count >= 4)
+                    {
+                        average_lux =
+                            (lux_total / 4) / 100;
+
+                        brightness =
+                            Calculate_Brightness(average_lux);
+
+                        sample_count = 0;
+                        lux_total = 0;
+                    }
+
+                    display_flag = 1;
+                }
+            }
+        }
+
+        if(display_flag)
+        {
+            __disable_interrupt();
+            display_flag = 0;
+            __enable_interrupt();
+
+            Update_Display();
+        }
+
+        // Low power mode
+        __disable_interrupt();
+
+        if(!timer_flag && !display_flag)
+        {
+            __bis_SR_register(LPM0_bits | GIE);
+        }
+        else
+        {
+            __enable_interrupt();
+        }
+    }
+}
+
+// Determine brightness from average lux
+unsigned char Calculate_Brightness(unsigned long lux)
+{
+    if(lux < 100)
+        return 4;
+    else if(lux < 200)
+        return 3;
+    else if(lux < 300)
+        return 2;
+    else if(lux < 400)
+        return 1;
+    else
+        return 0;
+}
+
+// LCD display
+void Update_Display(void)
+{
+    char mystring[24];
+    static unsigned char previous_mode = 2;
+
+    // Clear screen only when changing modes
+    if(previous_mode != auto_mode)
+    {
+        Graphics_clearDisplay(&g_sContext);
+        previous_mode = auto_mode;
+
+        if(auto_mode)
+        {
+            Graphics_drawStringCentered(
+                &g_sContext, "Mode: Auto",
+                AUTO_STRING_LENGTH, 64, 15, OPAQUE_TEXT);
+        }
+        else
+        {
+            Graphics_drawStringCentered(
+                &g_sContext, "Mode: Manual",
+                AUTO_STRING_LENGTH, 64, 25, OPAQUE_TEXT);
+        }
+    }
+
+    if(auto_mode)
+    {
+        sprintf(mystring, "Lux: %lu      ", current_lux);
+
+        Graphics_drawString(
+            &g_sContext, (int8_t *)mystring,
+            AUTO_STRING_LENGTH, 8, 45, OPAQUE_TEXT);
+
+        sprintf(mystring, "Avg: %lu      ", average_lux);
+
+        Graphics_drawString(
+            &g_sContext, (int8_t *)mystring,
+            AUTO_STRING_LENGTH, 8, 70, OPAQUE_TEXT);
+
+        sprintf(mystring, "Brightness: %u  ",
+                (unsigned int)brightness);
+
+        Graphics_drawString(
+            &g_sContext, (int8_t *)mystring,
+            AUTO_STRING_LENGTH, 8, 100, OPAQUE_TEXT);
+    }
+    else
+    {
+        Graphics_drawStringCentered(
+            &g_sContext,
+            manual_on ? "LED: ON " : "LED: OFF",
+            AUTO_STRING_LENGTH, 64, 70, OPAQUE_TEXT);
+    }
+}
+
+// One-second timer
+void Initialize_Timer(void)
+{
+    TA0CCR0 = 32767;
+    TA0CCTL0 = CCIE;
+    TA0CTL = TASSEL__ACLK | MC__UP | TACLR;
+}
+
+// Software PWM timer
+void Initialize_PWM(void)
+{
+    TA1CCR0 = 81;
+    TA1CCTL0 = CCIE;
+    TA1CTL = TASSEL__ACLK | MC__UP | TACLR;
+}
+
+// Configure buttons
+void Initialize_Buttons(void)
+{
+    P1DIR &= ~(BUT1 | BUT2);
+    P1REN |= (BUT1 | BUT2);
+    P1OUT |= (BUT1 | BUT2);
+
+    P1IE |= (BUT1 | BUT2);
+    P1IES |= (BUT1 | BUT2);
+    P1IFG &= ~(BUT1 | BUT2);
+}
+
+// One-second timer interrupt
+#pragma vector = TIMER0_A0_VECTOR
+__interrupt void Timer_A_ISR(void)
+{
+    timer_flag = 1;
+    __bic_SR_register_on_exit(LPM0_bits);
+}
+
+// PWM interrupt
+#pragma vector = TIMER1_A0_VECTOR
+__interrupt void PWM_ISR(void)
+{
+    pwm_count++;
+
+    if(pwm_count >= 4)
+        pwm_count = 0;
+
+    if(auto_mode)
+    {
+        if(pwm_count < brightness)
+            P1OUT |= redLED;
+        else
+            P1OUT &= ~redLED;
+    }
+    else
+    {
+        if(manual_on)
+            P1OUT |= redLED;
+        else
+            P1OUT &= ~redLED;
+    }
+}
+
+// Button interrupts
+#pragma vector = PORT1_VECTOR
+__interrupt void Port1_ISR(void)
+{
+    if(P1IFG & BUT1)
+    {
+        auto_mode ^= 1;
+
+        if(auto_mode)
+        {
+            P9OUT |= greenLED;
+        }
+        else
+        {
+            P9OUT &= ~greenLED;
+        }
+
+        sample_count = 0;
+        lux_total = 0;
+        display_flag = 1;
+
+        P1IFG &= ~BUT1;
+    }
+
+    if(P1IFG & BUT2)
+    {
+        if(!auto_mode)
+        {
+            manual_on ^= 1;
+            display_flag = 1;
+        }
+
+        P1IFG &= ~BUT2;
+    }
+
+    __bic_SR_register_on_exit(LPM0_bits);
+}
+
+// Configure ACLK to 32 KHz crystal
+void config_ACLK_to_32KHz_crystal(void)
+{
+    PJSEL1 &= ~BIT4;
+    PJSEL0 |= BIT4;
+
+    CSCTL0 = CSKEY;
+
+    do
+    {
+        CSCTL5 &= ~LFXTOFFG;
+        SFRIFG1 &= ~OFIFG;
+    }
+    while((CSCTL5 & LFXTOFFG) != 0);
+
     CSCTL0_H = 0;
 }
 
-static void lcd_init(void)
+// I2C initialization from original sensor lab
+void Initialize_I2C(void)
 {
-    Crystalfontz128x128_Init();
-    Crystalfontz128x128_SetOrientation(0);
-    Graphics_initContext(&screen, &g_sCrystalfontz128x128);
-    Graphics_setBackgroundColor(&screen, GRAPHICS_COLOR_NAVY);
-    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_YELLOW);
-    GrContextFontSet(&screen, &g_sFontFixed6x8);
-    Graphics_clearDisplay(&screen);
-}
+    UCB1CTLW0 |= UCSWRST;
 
-static void line(uint8_t y, const char *text)
-{
-    static char previous[7][22];
-    static uint8_t drawn;
-    uint8_t row = (uint8_t)((y - 4u) / 18u);
-    uint8_t mask = (uint8_t)(1u << row);
-    Graphics_Rectangle r = {0, 0, 127, 0};
-    /* Avoid repainting the title, mode, unchanged average and instructions
-     * for every sensor sample. All seven screen rows have fixed positions.
-     */
-    if ((drawn & mask) && strcmp(previous[row], text) == 0) return;
-    strncpy(previous[row], text, sizeof previous[row] - 1);
-    previous[row][sizeof previous[row] - 1] = 0;
-    drawn |= mask;
-    r.yMin = y; r.yMax = y + 9;
-    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_NAVY);
-    Graphics_fillRectangle(&screen, &r);
-    Graphics_setForegroundColor(&screen, GRAPHICS_COLOR_YELLOW);
-    Graphics_drawString(&screen, (int8_t *)text, AUTO_STRING_LENGTH,
-                        0, y, OPAQUE_TEXT);
-}
+    P4SEL1 |= (BIT1 | BIT0);
+    P4SEL0 &= ~(BIT1 | BIT0);
 
-/* Bounded formatting: largest OPT3001 result is 83,865.60 lux. */
-static void number_line(uint8_t y, const char *label, uint32_t value,
-                        uint8_t decimal)
-{
-    char text[22], digits[10];
-    uint8_t n = 0, d = 0;
-    uint32_t whole = decimal ? value / 100UL : value;
-    while (*label && n < 10) text[n++] = *label++;
-    do { digits[d++] = (char)('0' + whole % 10UL); whole /= 10UL; }
-    while (whole && d < sizeof digits);
-    while (d) text[n++] = digits[--d];
-    if (decimal) {
-        text[n++] = '.';
-        text[n++] = (char)('0' + (value / 10UL) % 10UL);
-        text[n++] = (char)('0' + value % 10UL);
-    }
-    text[n] = 0;
-    line(y, text);
-}
+    UCB1CTLW0 |= UCMODE_3 | UCMST | UCSSEL_3;
 
-static void hex_line(uint8_t y, const char *label, uint16_t value)
-{
-    char text[22];
-    static const char hex[] = "0123456789ABCDEF";
-    uint8_t n = 0, i;
-    while (*label && n < 14) text[n++] = *label++;
-    for (i = 0; i < 4; ++i)
-        text[n++] = hex[(value >> (12 - 4 * i)) & 15u];
-    text[n] = 0;
-    line(y, text);
-}
-
-static void display(void)
-{
-    line(4, "SMART LIGHTING");
-    line(22, auto_mode ? "Mode: AUTO" : "Mode: MANUAL");
-    if (auto_mode) {
-        if (sensor_error) {
-            switch (sensor_error) {
-            case I2C_NO_ACK: line(40, "I2C: NO ACK"); break;
-            case I2C_TIMEOUT: line(40, "I2C: TIMEOUT"); break;
-            case I2C_BUS_BUSY: line(40, "I2C: BUS BUSY"); break;
-            case I2C_ARBITRATION: line(40, "I2C: ARBITRATION"); break;
-            case SENSOR_NOT_READY: line(40, "SENSOR: NOT READY"); break;
-            case SENSOR_OVERFLOW: line(40, "SENSOR: OVERFLOW"); break;
-            case SENSOR_CONFIG_ERROR: line(40, "SENSOR: CONFIG ERROR"); break;
-            case SENSOR_ID_ERROR: line(40, "SENSOR: ID ERROR"); break;
-            default: line(40, "SAMPLE DEADLINE MISS"); break;
-            }
-        }
-        else if (samples || avg_valid) number_line(40, "Lux: ", lux100, 1);
-        else line(40, "Lux: waiting");
-        if (sensor_error == SENSOR_ID_ERROR)
-            hex_line(58, "MFG: 0x", manufacturer_id);
-        else if (sensor_error && config_seen)
-            hex_line(58, "Config: 0x", last_sensor_config);
-        else if (avg_valid) number_line(58, "Avg: ", average100, 1);
-        else line(58, "Avg: collecting");
-        if (sensor_error == SENSOR_ID_ERROR)
-            hex_line(76, "DEV: 0x", device_id);
-        else number_line(76, "Level: ", pwm_level, 0);
-        number_line(94, "Samples: ", samples, 0);
-    } else {
-        line(40, manual_on ? "Red LED: ON" : "Red LED: OFF");
-        line(58, "S2: toggle LED"); line(76, ""); line(94, "");
-    }
-    line(112, "S1: change mode");
-}
-
-static void Initialize_I2C(void)
-{
-    P4SEL0 &= ~(BIT0 | BIT1);
-    P4SEL1 |= BIT0 | BIT1; /* secondary function = UCB1SDA/UCB1SCL */
-    UCB1CTLW0 = UCSWRST | UCMST | UCMODE_3 | UCSYNC | UCSSEL__SMCLK;
-    UCB1BRW = 64; /* Explicit project requirement: NOT 8. ~15.625 kHz. */
-    UCB1CTLW1 = UCASTP_2;
-    UCB1TBCNT = 1;
-    UCB1I2CSA = SENSOR_ADDRESS;
-    UCB1IE = 0; /* Bounded foreground polling; no I2C ISR needed. */
-    UCB1CTLW0 &= ~UCSWRST;
-}
-
-static uint8_t bus_idle(void)
-{
-    uint32_t guard = I2C_LIMIT;
-    while ((UCB1CTLW0 & UCTXSTP) || (UCB1STATW & UCBBUSY))
-        if (--guard == 0) { bus_error = I2C_BUS_BUSY; return 0; }
-    return 1;
-}
-
-static uint8_t wait_flag(uint16_t flag)
-{
-    uint32_t guard = I2C_LIMIT;
-    while (!(UCB1IFG & flag)) {
-        if (UCB1IFG & UCNACKIFG) { bus_error = I2C_NO_ACK; return 0; }
-        if (UCB1IFG & UCALIFG) { bus_error = I2C_ARBITRATION; return 0; }
-        if (--guard == 0) { bus_error = I2C_TIMEOUT; return 0; }
-    }
-    if (UCB1IFG & UCNACKIFG) { bus_error = I2C_NO_ACK; return 0; }
-    if (UCB1IFG & UCALIFG) { bus_error = I2C_ARBITRATION; return 0; }
-    return 1;
-}
-
-static uint8_t i2c_fail(void)
-{
-    uint32_t guard = I2C_LIMIT;
-    if (UCB1IFG & UCNACKIFG) bus_error = I2C_NO_ACK;
-    else if (UCB1IFG & UCALIFG) bus_error = I2C_ARBITRATION;
-    else if (!bus_error) bus_error = I2C_TIMEOUT;
-    UCB1CTLW0 |= UCTXSTP;
-    while ((UCB1CTLW0 & UCTXSTP) && --guard) { }
-    Initialize_I2C(); /* Software reset; stuck physical bus is reported, not hung. */
-    return 0;
-}
-
-static uint8_t start_counted(uint8_t count, uint8_t transmit)
-{
-    bus_error = SENSOR_OK;
-    if (!bus_idle()) return i2c_fail();
-    /* Program the byte counter only in reset. Clear stale RX/TX/STOP flags.
-     * Hardware generates the final NACK and STOP at the exact byte boundary.
-     */
-    UCB1CTLW0 = UCSWRST | UCMST | UCMODE_3 | UCSYNC | UCSSEL__SMCLK;
-    if (transmit) UCB1CTLW0 |= UCTR;
-    UCB1CTLW1 = UCASTP_2;
-    UCB1TBCNT = count;
+    // Required project change
     UCB1BRW = 64;
-    UCB1I2CSA = SENSOR_ADDRESS;
-    UCB1IE = 0;
-    UCB1IFG = 0;
+
     UCB1CTLW0 &= ~UCSWRST;
+}
+
+// I2C write function from original sensor lab
+int i2c_write_word(unsigned char i2c_address,
+                   unsigned char i2c_reg, unsigned int data)
+{
+    unsigned char byte1, byte2;
+
+    byte1 = (data >> 8) & 0xFF;
+    byte2 = data & 0xFF;
+
+    UCB1I2CSA = i2c_address;
+    UCB1CTLW0 |= UCTR;
     UCB1CTLW0 |= UCTXSTT;
-    return 1;
-}
 
-static uint8_t finish_counted(void)
-{
-    if (!wait_flag(UCSTPIFG)) return i2c_fail();
-    if (!bus_idle()) return i2c_fail();
-    return 1;
-}
+    while((UCB1IFG & UCTXIFG0) == 0) {}
 
-static uint8_t write_register(uint8_t reg, uint16_t data)
-{
-    if (!start_counted(3, 1)) return 0;
-    if (!wait_flag(UCTXIFG0)) return i2c_fail();
-    UCB1TXBUF = reg;
-    if (!wait_flag(UCTXIFG0)) return i2c_fail();
-    UCB1TXBUF = (uint8_t)(data >> 8);
-    if (!wait_flag(UCTXIFG0)) return i2c_fail();
-    UCB1TXBUF = (uint8_t)data;
-    return finish_counted();
-}
+    UCB1TXBUF = i2c_reg;
 
-static uint8_t read_register(uint8_t reg, uint16_t *data)
-{
-    uint8_t hi, lo;
-    /* The OPT3001 retains the selected register across STOP. Select it in
-     * a one-byte write, then start a separate, exactly two-byte read.
-     */
-    if (!start_counted(1, 1)) return 0;
-    if (!wait_flag(UCTXIFG0)) return i2c_fail();
-    UCB1TXBUF = reg;
-    if (!finish_counted()) return 0;
-    if (!start_counted(2, 0)) return 0;
-    if (!wait_flag(UCRXIFG0)) return i2c_fail();
-    hi = UCB1RXBUF;
-    if (!wait_flag(UCRXIFG0)) return i2c_fail();
-    lo = UCB1RXBUF;
-    if (!finish_counted()) return 0;
-    *data = ((uint16_t)hi << 8) | lo;
-    return 1;
-}
+    while((UCB1CTLW0 & UCTXSTT) != 0) {}
 
-static uint8_t sensor_setup(void)
-{
-    if (!read_register(0x7E, &manufacturer_id) ||
-        !read_register(0x7F, &device_id)) {
-        sensor_error = bus_error;
-        return 0;
-    }
-    /* Fixed read-only words verify the link before trusting any lux data. */
-    if (manufacturer_id != 0x5449u || device_id != 0x3001u) {
-        sensor_error = SENSOR_ID_ERROR;
-        return 0;
-    }
-    if (!write_register(1, SENSOR_CONFIG)) {
-        sensor_error = bus_error;
-        return 0;
-    }
-    sensor_error = SENSOR_NOT_READY;
-    return 1;
-}
+    UCB1TXBUF = byte1;
 
-static uint8_t measure(uint32_t *result)
-{
-    uint16_t config, raw;
-    if (!sensor_ready) {
-        sensor_ready = sensor_setup();
-        return 0; /* Wait until a later second for the first conversion. */
-    }
-    if (!read_register(1, &config)) {
-        sensor_ready = 0; sensor_error = bus_error; return 0;
-    }
-    last_sensor_config = config;
-    config_seen = 1;
-    /* Both M=10 and M=11 mean continuous conversions. Check the fields that
-     * affect measurement/decoding, not the exact spelling of continuous mode
-     * or the comparator/interrupt settings (the INT pin is not used here).
-     */
-    if ((config & 0xFC04u) != (SENSOR_CONFIG & 0xFC04u)) {
-        sensor_ready = 0; sensor_error = SENSOR_CONFIG_ERROR; return 0;
-    }
-    /* CRF bit7: a fresh conversion; OVF bit8: out of range. */
-    if (!(config & BIT7)) { sensor_error = SENSOR_NOT_READY; return 0; }
-    if (config & BIT8) { sensor_error = SENSOR_OVERFLOW; return 0; }
-    if (!read_register(0, &raw)) {
-        sensor_ready = 0; sensor_error = bus_error; return 0;
-    }
-    *result = (uint32_t)(raw & 0x0FFFu) << (raw >> 12);
-    return 1; /* lux = 0.01 * mantissa * 2^exponent */
-}
+    while((UCB1IFG & UCTXIFG0) == 0) {}
 
-static uint8_t level_from_sum(uint32_t sum)
-{
-    /* Compare the four-sample sum to avoid average-rounding boundary errors. */
-    if (sum < 40000UL) return 4;
-    if (sum < 80000UL) return 3;
-    if (sum < 120000UL) return 2;
-    if (sum < 160000UL) return 1;
+    UCB1TXBUF = byte2;
+
+    while((UCB1IFG & UCTXIFG0) == 0) {}
+
+    UCB1CTLW0 |= UCTXSTP;
+
+    while((UCB1CTLW0 & UCTXSTP) != 0) {}
+
     return 0;
 }
 
-static void discard_batch(void)
+// I2C read function from original sensor lab
+int i2c_read_word(unsigned char i2c_address,
+                  unsigned char i2c_reg)
 {
-    samples = 0; sum100 = 0; avg_valid = 0;
-}
+    unsigned char byte1, byte2;
+    unsigned int data2;
 
-static void timers_init(void)
-{
-    TA0CCR0 = 999; /* 1 MHz / 1000 = 1 kHz PWM */
-    TA0CCR1 = 250;
-    TA0CCTL0 = CCIE;
-    TA0CCTL1 = 0;
-    TA0CTL = TASSEL__SMCLK | MC__UP | TACLR;
-    TA1CCR0 = 1249; /* 1 MHz / 8 / 1250 = 100 Hz */
-    TA1CCTL0 = CCIE;
-    TA1CTL = TASSEL__SMCLK | ID__8 | MC__UP | TACLR;
-}
+    byte1 = 111;
+    byte2 = 111;
 
-int main(void)
-{
-    uint16_t now, due;
-    uint8_t events, dirty = 0;
-    WDTCTL = WDTPW | WDTHOLD;
-    clock_init();
-    P1SEL0 &= ~(RED | S1 | S2); P1SEL1 &= ~(RED | S1 | S2);
-    P1DIR = (P1DIR | RED) & ~(S1 | S2);
-    P1OUT |= RED | S1 | S2; P1REN |= S1 | S2; P1IE &= ~(S1 | S2);
-    P9SEL0 &= ~GREEN; P9SEL1 &= ~GREEN;
-    P9DIR |= GREEN; P9OUT |= GREEN;
-    PM5CTL0 &= ~LOCKLPM5;
-    lcd_init();
-    Initialize_I2C();
-    sensor_ready = sensor_setup();
-    display(); /* Finish the initial screen BEFORE starting sample deadlines. */
-    timers_init();
-    next_sample = SECOND_TICKS;
-    __enable_interrupt();
-    for (;;) {
-        __disable_interrupt();
-        now = ticks;
-        events = button_events; button_events = 0;
-        __enable_interrupt();
-        if (events & S1) {
-            auto_mode ^= 1;
-            discard_batch();
-            sensor_error = 0;
-            if (auto_mode) {
-                P9OUT |= GREEN;
-                pwm_level = 4;
-                next_sample = now + SECOND_TICKS;
-            } else {
-                P9OUT &= ~GREEN;
-                manual_on = 0; pwm_level = 0;
-            }
-            dirty = 1;
-        } else if ((events & S2) && !auto_mode) {
-            manual_on ^= 1; pwm_level = manual_on ? 4 : 0;
-            dirty = 1;
-        }
-        /* Signed modular comparison is valid: serviced at least every 10 ms. */
-        if (auto_mode && (int16_t)(now - next_sample) >= 0) {
-            due = next_sample;
-            next_sample += SECOND_TICKS;
-            if ((uint16_t)(now - due) >= SECOND_TICKS) {
-                /* Do not manufacture several samples from one late reading. */
-                discard_batch(); sensor_error = SAMPLE_MISSED; pwm_level = 4;
-                next_sample = now + SECOND_TICKS;
-            } else if (measure(&lux100)) {
-                sensor_error = 0;
-                sum100 += lux100;
-                if (++samples == 4) {
-                    average100 = sum100 / 4UL;
-                    pwm_level = level_from_sum(sum100);
-                    avg_valid = 1;
-                    samples = 0; sum100 = 0;
-                }
-            } else {
-                discard_batch(); pwm_level = 4; /* measure supplies the reason. */
-            }
-            dirty = 1;
-        }
-        if (dirty) { display(); dirty = 0; }
-        /* Atomic work check + sleep prevents lost button/tick wakeups. */
-        __disable_interrupt();
-        if (!button_events &&
-            (!auto_mode || (int16_t)(ticks - next_sample) < 0))
-            __bis_SR_register(LPM0_bits | GIE);
-        else __enable_interrupt();
-    }
-}
+    UCB1I2CSA = i2c_address;
 
-#pragma vector = TIMER0_A0_VECTOR
-__interrupt void pwm_period_isr(void)
-{
-    uint8_t level = pwm_level;
-    TA0CCTL1 = 0; /* Discard previous CCR1 flag before changing duty. */
-    if (level == 0) {
-        P1OUT &= ~RED;
-        P2OUT &= ~BOOSTER_RED;
-    }
-    else {
-        P1OUT |= RED;
-        P2OUT |= BOOSTER_RED;
-        if (level < 4) {
-            TA0CCR1 = (uint16_t)level * 250u;
-            TA0CCTL1 = CCIE;
-        }
-    }
-    /* PWM interrupts return directly to sleep: foreground has no work here. */
-}
+    UCB1IFG &= ~UCTXIFG0;
+    UCB1CTLW0 |= UCTR;
+    UCB1CTLW0 |= UCTXSTT;
 
-#pragma vector = TIMER0_A1_VECTOR
-__interrupt void pwm_falling_isr(void)
-{
-    if (TA0IV == TA0IV_TACCR1) {
-        P1OUT &= ~RED;
-        P2OUT &= ~BOOSTER_RED;
-    }
-}
+    while((UCB1IFG & UCTXIFG0) == 0) {}
 
-#pragma vector = TIMER1_A0_VECTOR
-__interrupt void scheduler_isr(void)
-{
-    static uint8_t stable, candidate, count;
-    uint8_t pressed = (uint8_t)(~P1IN) & (S1 | S2);
-    ++ticks;
-    if (pressed != candidate) { candidate = pressed; count = 1; }
-    else if (count < 3) ++count;
-    if (count == 3 && stable != candidate) {
-        button_events |= candidate & (uint8_t)~stable;
-        stable = candidate;
-    }
-    __bic_SR_register_on_exit(LPM0_bits);
+    UCB1TXBUF = i2c_reg;
+
+    while((UCB1CTLW0 & UCTXSTT) != 0) {}
+
+    if((UCB1IFG & UCNACKIFG) != 0)
+        return -1;
+
+    UCB1CTLW0 &= ~UCTR;
+    UCB1CTLW0 |= UCTXSTT;
+
+    while((UCB1IFG & UCRXIFG0) == 0) {}
+
+    byte1 = UCB1RXBUF;
+
+    while((UCB1CTLW0 & UCTXSTT) != 0) {}
+
+    UCB1CTLW0 |= UCTXSTP;
+
+    while((UCB1IFG & UCRXIFG0) == 0) {}
+
+    byte2 = UCB1RXBUF;
+
+    while((UCB1CTLW0 & UCTXSTP) != 0) {}
+
+    data2 = ((byte1 << 8) | (byte2 & 0xFF));
+
+    return data2;
 }

@@ -13,11 +13,9 @@ void HAL_LCD_PortInit(void)
     // Divert UCB0CLK/P1.4 pin to serial clock
     P1SEL0 |= BIT4;
     P1SEL1 &= ~BIT4;
-
     // Divert UCB0SIMO/P1.6 pin to SIMO
     P1SEL0 |= BIT6;
-    P1SEL1 &= ~BIT6;
-
+    P1SEL1 &= BIT6;
     // OK to ignore UCB0STE/P1.5 since we'll connect the display's enable bit to low (enabled all the time)
     // OK to ignore UCB0SOMI/P1.7 since the display doesn't give back any data
 
@@ -25,28 +23,11 @@ void HAL_LCD_PortInit(void)
     // Configuring the display's other pins
     ///////////////////////////////////////////////
     // Set reset pin as output
-    P9SEL0 &= ~BIT4;
-    P9SEL1 &= ~BIT4;
-    P9OUT |= BIT4;
     P9DIR |= BIT4;
-
     // Set the data/command pin as output
-    P2SEL0 &= ~BIT3;
-    P2SEL1 &= ~BIT3;
-    P2OUT &= ~BIT3;
     P2DIR |= BIT3;
-
     // Set the chip select pin as output
-    P2SEL0 &= ~BIT5;
-    P2SEL1 &= ~BIT5;
-    P2OUT &= ~BIT5;
     P2DIR |= BIT5;
-
-    // Set the backlight pin as output and turn the backlight on
-    P2SEL0 &= ~BIT6;
-    P2SEL1 &= ~BIT6;
-    P2OUT |= BIT6;
-    P2DIR |= BIT6;
 
     return;
 }
@@ -73,17 +54,13 @@ void HAL_LCD_SpiInit(void)
     UCB0CTLW0 |= UCMST;
 
     // Set SPI to "3 pin SPI" (we won't use eUSCI's chip select)
-    UCB0CTLW0 &= ~UCMODE_3;
+    UCB0CTLW0 &= ~(UCMODE0 | UCMODE1);
 
     // Set module to synchronous mode
     UCB0CTLW0 |= UCSYNC;
 
     // Set clock to SMCLK
-    UCB0CTLW0 &= ~UCSSEL_3;
-    UCB0CTLW0 |= UCSSEL_2;
-
-    // Use 8-bit transfers
-    UCB0CTLW0 &= ~UC7BIT;
+    UCB0CTLW0 = (UCB0CTLW0 & ~UCSSEL_3) | UCSSEL_2;
 
     // Set clock divider to 1 (SMCLK is from DCO at 8 MHz; we'll run SPI at 8 MHz)
     UCB0BRW = 0x01;
@@ -95,12 +72,10 @@ void HAL_LCD_SpiInit(void)
     P2OUT &= ~BIT5;
 
     // Set DC' bit to 0 (assume data)
-    // Correction: DC low selects command; DC high selects data.
     P2OUT &= ~BIT3;
 
     return;
 }
-
 
 //*****************************************************************************
 // Writes a command to the CFAF128128B-0145T.  This function implements the basic SPI
@@ -108,9 +83,6 @@ void HAL_LCD_SpiInit(void)
 //*****************************************************************************
 void HAL_LCD_writeCommand(uint8_t command)
 {
-    // Finish the previous transfer before changing command/data.
-    while (UCB0STATW & UCBUSY);
-
     // For command, set the DC' bit to low before transmission
     P2OUT &= ~BIT3;
 
@@ -119,7 +91,6 @@ void HAL_LCD_writeCommand(uint8_t command)
 
     // Transmit data
     UCB0TXBUF = command;
-    while (UCB0STATW & UCBUSY); // Finish command before returning D/C high.
 
     // Set DC' bit back to high
     P2OUT |= BIT3;
@@ -138,7 +109,6 @@ void HAL_LCD_writeData(uint8_t data)
     // Transmit data
     UCB0TXBUF = data;
 }
-
 
 
 
